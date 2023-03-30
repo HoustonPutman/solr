@@ -20,9 +20,14 @@ import static org.apache.solr.common.params.CommonParams.VERSION_FIELD;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.PointValues;
@@ -49,6 +54,8 @@ public class VersionInfo {
       "bucketVersionLockTimeoutMs";
 
   private final UpdateLog ulog;
+  private final Function<Long, VersionBucket> bucketCreator;
+  private volatile long latestHighestVersion;
   private final VersionBucket[] buckets;
   private SchemaField versionField;
   final ReadWriteLock lock = new ReentrantReadWriteLock(true);
@@ -104,12 +111,18 @@ public class VersionInfo {
             .intVal(
                 Integer.parseInt(System.getProperty(SYS_PROP_BUCKET_VERSION_LOCK_TIMEOUT_MS, "0")));
     buckets = new VersionBucket[BitUtil.nextHighestPowerOfTwo(nBuckets)];
-    for (int i = 0; i < buckets.length; i++) {
-      if (versionBucketLockTimeoutMs > 0) {
-        buckets[i] = new TimedVersionBucket();
-      } else {
-        buckets[i] = new VersionBucket();
-      }
+    if (versionBucketLockTimeoutMs > 0) {
+      bucketCreator = (highestVersion) -> {
+        var bucket = new TimedVersionBucket();
+        bucket.updateHighest(highestVersion);
+        return bucket;
+      };
+    } else {
+      bucketCreator = (highestVersion) -> {
+        var bucket = new VersionBucket();
+        bucket.updateHighest(highestVersion);
+        return bucket;
+      };
     }
   }
 
@@ -207,7 +220,17 @@ public class VersionInfo {
     // Assume good hash codes for now.
 
     int slot = hash & (buckets.length - 1);
-    return buckets[slot];
+    VersionBucket bucket = buckets[slot];
+    if (bucket == null) {
+      synchronized (buckets) {
+        bucket = buckets[slot];
+        if (bucket == null) {
+          bucket = bucketCreator.apply(latestHighestVersion);
+          buckets[slot] = bucket;
+        }
+      }
+    }
+    return bucket;
   }
 
   public Long lookupVersion(BytesRef idBytes) {
@@ -284,11 +307,14 @@ public class VersionInfo {
   }
 
   public void seedBucketsWithHighestVersion(long highestVersion) {
+    latestHighestVersion = highestVersion;
     for (int i = 0; i < buckets.length; i++) {
       // should not happen, but in case other threads are calling updateHighest on the version
       // bucket
-      synchronized (buckets[i]) {
-        if (buckets[i].highest < highestVersion) buckets[i].highest = highestVersion;
+      if (buckets[i] != null) {
+        synchronized (buckets[i]) {
+          if (buckets[i].highest < highestVersion) buckets[i].highest = highestVersion;
+        }
       }
     }
   }
