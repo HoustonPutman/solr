@@ -28,7 +28,7 @@ plugins {
 // from across the project structure into release artifacts.
 
 ext {
-  releaseDir = file("${buildDir}/release")
+  releaseDir = "${buildDir}/release"
   withSignedArtifacts = { ->
     def propValue = propertyOrDefault("sign", null)
     // Allow -Psign to work as a shorthand for -Psign=true
@@ -39,6 +39,7 @@ ext {
     // Allow -PuseGpg to work as a shorthand for -PuseGpg=true
     return propValue != null && (propValue.isBlank() || Boolean.parseBoolean(propValue))
   }.call()
+  modulesReleaseDir = "${releaseDir}/modules"
 }
 
 if (project.ext.useGpgForSigning) {
@@ -55,11 +56,20 @@ apply from: buildscript.sourceFile.toPath().resolveSibling("source-release.gradl
 configurations {
   changesHtml
   docker
+  modules
+  extras
+  release
 }
 
 dependencies {
   changesHtml project(path: ":solr:documentation", configuration: "changesHtml")
   docker project(path: ':solr:docker', configuration: 'packagingOfficial')
+
+  project(":solr:modules").childProjects.values().stream().map(project -> project.path).each { module ->
+    modules project(path: module, configuration: "distribution")
+  }
+
+  extras project(path: ":solr:prometheus-exporter", configuration: "distribution")
 }
 
 def fullDistTarTask = rootProject.getTasksByName("fullDistTar", true)[0]
@@ -130,6 +140,14 @@ task assembleRelease(type: Sync) {
     into "docker"
   })
 
+  from(configurations.modules, {
+    into "modules"
+  })
+
+  from(configurations.extras, {
+    into "extras"
+  })
+
   from(rootProject.mavenLocalDir, {
     into "maven"
   })
@@ -157,4 +175,10 @@ tasks.matching {it.name in [
     "assembleRelease",
 ]}.all {
   group "distribution"
+}
+
+artifacts {
+  release file(releaseDir), {
+    builtBy tasks.assembleRelease
+  }
 }

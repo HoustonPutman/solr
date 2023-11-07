@@ -1,3 +1,5 @@
+import org.apache.lucene.gradle.Checksum
+
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements.  See the NOTICE file distributed with
@@ -40,7 +42,10 @@ configure(allprojects.findAll {project -> project.path.startsWith(":solr:modules
   plugins.withType(JavaPlugin) {
     ext {
       packagingDir = file("${buildDir}/packaging")
-      if (project.path.startsWith(":solr:prometheus-exporter")) {
+      distributionDir = "${buildDir}/distributions"
+      checksumsDir = file("${buildDir}/checksums")
+      signaturesDir = file("${buildDir}/signatures")
+      if (project.path == ":solr:prometheus-exporter") {
         deps = packagingDir
       } else {
         deps = file("${packagingDir}/${project.name}")
@@ -53,6 +58,7 @@ configure(allprojects.findAll {project -> project.path.startsWith(":solr:modules
         extendsFrom runtimeElements
       }
       packaging
+      distribution
     }
 
     dependencies {
@@ -88,35 +94,64 @@ configure(allprojects.findAll {project -> project.path.startsWith(":solr:modules
       into deps
     }
 
-    task syncLib(type: Sync) {
-      dependsOn assemblePackaging
+    task assembleDistribution(type: Tar) {
+      dependsOn tasks.assemblePackaging
 
-      from(file("${deps}/lib"), {
-        include "**"
-      })
-      into file("${projectDir}/lib")
+      if (project.path == ":solr:prometheus-exporter") {
+        archiveBaseName = "solr-${project.name}"
+      } else {
+        archiveBaseName = "solr-module-${project.name}"
+      }
+
+      from (deps) {
+        into project.name
+
+        // Manually correct posix permissions (matters when packaging on Windows).
+        filesMatching([
+                "**/bin/*",
+        ]) { copy ->
+          copy.setMode(0755)
+        }
+      }
+
+      compression = Compression.GZIP
     }
 
-    task syncTestLib(type: Sync) {
-      // From test runtime classpath exclude:
-      // 1) project dependencies (and their dependencies)
-      // 2) runtime dependencies
-      // What remains is this module's "own" test dependency.
-      from({
-        def testRuntimeLibs = configurations.testRuntimeClasspath.copyRecursive { dep ->
-          !(dep instanceof org.gradle.api.artifacts.ProjectDependency)
-        }
+    // Compute checksums for release archives.
+    task computeChecksums(type: Checksum) {
+      algorithm = Checksum.Algorithm.SHA512
+      dependsOn tasks.assembleDistribution
 
-        return testRuntimeLibs - configurations.runtimeLibs
-      })
+      files = tasks.assembleDistribution.outputs.files.asFileTree
 
-      into file("${projectDir}/test-lib")
+      outputDir = checksumsDir
+    }
+
+    tasks.assembleDistribution.finalizedBy(tasks.computeChecksums)
+
+    task signDistribution(type: Sign) {
+      sign assembleDistribution
+    }
+
+    task setSignatures(type: Sync) {
+      from tasks.signDistribution
+
+      into signaturesDir
     }
 
     // Module packaging currently depends on internal resolve.
     artifacts {
       packaging packagingDir, {
-        builtBy assemblePackaging
+        builtBy tasks.assemblePackaging
+      }
+      distribution(assembleDistribution)
+      distribution(checksumsDir) {
+          builtBy tasks.computeChecksums
+      }
+
+      // Conditionally, attach signatures of all the release archives.
+      distribution signaturesDir, {
+        builtBy tasks.setSignatures
       }
     }
   }
