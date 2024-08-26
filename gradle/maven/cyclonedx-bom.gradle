@@ -39,7 +39,8 @@ allprojects { prj ->
       outputName = baseName
       outputFormat = "all"
       includeBomSerialNumber = true
-      componentVersion = version
+      componentVersion = "${version}"
+      componentName = prj.archivesBaseName
     }
     assemble.dependsOn cyclonedxBom
 
