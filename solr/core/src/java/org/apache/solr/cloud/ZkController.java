@@ -764,14 +764,21 @@ public class ZkController implements Closeable {
     customThreadPool.execute(() -> IOUtils.closeQuietly(overseer));
 
     try {
-      customThreadPool.execute(
-          () -> {
-            Collection<ElectionContext> values = electionContexts.values();
-            synchronized (electionContexts) {
-              values.forEach(IOUtils::closeQuietly);
-            }
-          });
-
+      synchronized (electionContexts) {
+        electionContexts.values().forEach(ctx ->
+            customThreadPool.execute(
+                () -> {
+                  try {
+                    ctx.cancelElection();
+                  } catch (Exception ignore) {
+                    // Do nothing
+                  } finally {
+                    IOUtils.closeQuietly(ctx);
+                  }
+                }
+            )
+        );
+      }
     } finally {
 
       sysPropsCacher.close();

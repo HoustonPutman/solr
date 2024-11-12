@@ -78,14 +78,15 @@ public class SyncStrategy {
   }
 
   public PeerSync.PeerSyncResult sync(
-      ZkController zkController, SolrCore core, ZkNodeProps leaderProps) {
-    return sync(zkController, core, leaderProps, false);
+      ZkController zkController, SolrCore core, ZkNodeProps leaderProps, boolean replicaMayBeMissingDocs) {
+    return sync(zkController, core, leaderProps, replicaMayBeMissingDocs, false);
   }
 
   public PeerSync.PeerSyncResult sync(
       ZkController zkController,
       SolrCore core,
       ZkNodeProps leaderProps,
+      boolean replicaMayBeMissingDocs,
       boolean peerSyncOnlyWithActive) {
     if (SKIP_AUTO_RECOVERY) {
       return PeerSync.PeerSyncResult.success();
@@ -107,13 +108,14 @@ public class SyncStrategy {
       return PeerSync.PeerSyncResult.failure();
     }
 
-    return syncReplicas(zkController, core, leaderProps, peerSyncOnlyWithActive);
+    return syncReplicas(zkController, core, leaderProps, replicaMayBeMissingDocs, peerSyncOnlyWithActive);
   }
 
   private PeerSync.PeerSyncResult syncReplicas(
       ZkController zkController,
       SolrCore core,
       ZkNodeProps leaderProps,
+      boolean replicaMayBeMissingDocs,
       boolean peerSyncOnlyWithActive) {
     if (isClosed) {
       log.info("We have been closed, won't sync with replicas");
@@ -127,14 +129,19 @@ public class SyncStrategy {
     String collection = cloudDesc.getCollectionName();
     String shardId = cloudDesc.getShardId();
 
-    // first sync ourselves - we are the potential leader after all
-    try {
-      result =
-          syncWithReplicas(
-              zkController, core, leaderProps, collection, shardId, peerSyncOnlyWithActive);
-      success = result.isSuccess();
-    } catch (Exception e) {
-      log.error("Sync Failed", e);
+    // first sync ourselves - we are the potential leader after all.
+    // This is only needed if we might be missing docs (i.e. we don't have the highest shard term)
+    if (replicaMayBeMissingDocs) {
+      try {
+        result =
+            syncWithReplicas(
+                zkController, core, leaderProps, collection, shardId, peerSyncOnlyWithActive);
+        success = result.isSuccess();
+      } catch (Exception e) {
+        log.error("Sync Failed", e);
+      }
+    } else {
+      success = true;
     }
     try {
       if (isClosed) {
