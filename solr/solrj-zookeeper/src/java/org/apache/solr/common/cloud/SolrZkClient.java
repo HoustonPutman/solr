@@ -728,20 +728,10 @@ public class SolrZkClient implements Closeable {
     runWithCorrectThrows(
         "making path",
         () -> {
-          // This try/catch can be removed when CURATOR-719 is incorporated
-          try {
-            createBuilder
-                .creatingParentsIfNeeded()
-                .withMode(createMode)
-                .forPath(finalPath, finalData);
-          } catch (KeeperException.NodeExistsException e) {
-            // There can be a race exception when this is called in parallel
-            if (!failOnExists) {
-              setData(finalPath, finalData, true);
-            } else {
-              throw e;
-            }
-          }
+          createBuilder
+              .creatingParentsIfNeeded()
+              .withMode(createMode)
+              .forPath(finalPath, finalData);
           return client.checkExists().usingWatcher(wrapWatcher(watcher)).forPath(finalPath);
         });
   }
