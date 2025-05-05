@@ -57,6 +57,10 @@ public class SolrIndexSearcherTest extends SolrTestCaseJ4 {
               String.valueOf(i),
               "field4_t",
               numbersTo(i)));
+      // Make sure there are a few segments in the index
+      if (i % 50 == 0) {
+        assertU(commit());
+      }
     }
     assertU(commit());
   }
@@ -466,11 +470,11 @@ public class SolrIndexSearcherTest extends SolrTestCaseJ4 {
         .withSearcher(
             searcher -> {
               // max hits < doc count
-              QueryCommand cmd = createBasicQueryCommand(1000, 10, 20, "field1_s", "foo");
+              QueryCommand cmd = createBasicQueryCommand(1000, 170, 180, "field1_s", "foo");
               final QueryResult search = searcher.search(cmd);
               // in a single threaded search, the maxHitsAllowed will be exact
-              assertEquals(20, search.getDocList().matches());
-              assertEquals(10, search.getDocList().size());
+              assertEquals(180, search.getDocList().matches());
+              assertEquals(170, search.getDocList().size());
               assertTrue(search.isPartialResults());
               assertNull(search.getTerminatedEarly());
               assertEquals(Boolean.TRUE, search.getMaxHitsTerminatedEarly());
