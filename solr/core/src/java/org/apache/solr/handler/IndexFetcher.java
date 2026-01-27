@@ -652,34 +652,26 @@ public class IndexFetcher {
           }
         }
         boolean reloadCore = false;
-
+        boolean indexWriterClosed = false;
         try {
           // we have to be careful and do this after we know isFullCopyNeeded won't be flipped
           if (!isFullCopyNeeded) {
             solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(solrCore, true);
+            indexWriterClosed = true;
           }
 
           log.info("Starting download (fullCopy={}) to {}", isFullCopyNeeded, tmpIndexDir);
           successfulInstall = false;
 
-          long bytesDownloaded =
+          indexWriterClosed =
               downloadIndexFiles(
                   isFullCopyNeeded,
                   indexDir,
                   tmpIndexDir,
                   indexDirPath,
                   tmpIndexDirPath,
-                  latestGeneration);
-          final long timeTakenSeconds = getReplicationTimeElapsed();
-          final Long bytesDownloadedPerSecond =
-              (timeTakenSeconds != 0 ? bytesDownloaded / timeTakenSeconds : null);
-          log.info(
-              "Total time taken for download (fullCopy={},bytesDownloaded={}) : {} secs ({} bytes/sec) to {}",
-              isFullCopyNeeded,
-              bytesDownloaded,
-              timeTakenSeconds,
-              bytesDownloadedPerSecond,
-              tmpIndexDir);
+                  latestGeneration,
+                  indexWriterClosed);
 
           Collection<Map<String, Object>> modifiedConfFiles =
               getModifiedConfFiles(confFilesToDownload);
@@ -724,7 +716,7 @@ public class IndexFetcher {
         } finally {
           solrCore.searchEnabled = true;
           solrCore.indexEnabled = true;
-          if (!isFullCopyNeeded) {
+          if (indexWriterClosed) {
             solrCore.getUpdateHandler().getSolrCoreState().openIndexWriter(solrCore);
           }
         }
@@ -1105,15 +1097,16 @@ public class IndexFetcher {
    * @param tmpIndexDir the directory to which files need to be downloaded to
    * @param indexDirPath the path of indexDir
    * @param latestGeneration the version number
-   * @return number of bytes downloaded
+   * @return whether the index writer was closed
    */
-  private long downloadIndexFiles(
+  private boolean downloadIndexFiles(
       boolean downloadCompleteIndex,
       Directory indexDir,
       Directory tmpIndexDir,
       String indexDirPath,
       String tmpIndexDirPath,
-      long latestGeneration)
+      long latestGeneration,
+      boolean indexWriterClosed)
       throws Exception {
     if (log.isDebugEnabled()) {
       log.debug("Download files to dir: {}", Arrays.asList(indexDir.listAll()));
@@ -1142,7 +1135,7 @@ public class IndexFetcher {
     }
     long usableSpace = usableDiskSpaceProvider.apply(tmpIndexDirPath);
     if (getApproxTotalSpaceReqd(totalSpaceRequired) > usableSpace) {
-      deleteFilesInAdvance(indexDir, indexDirPath, totalSpaceRequired, usableSpace);
+      indexWriterClosed = deleteFilesInAdvance(indexDir, indexDirPath, totalSpaceRequired, usableSpace, indexWriterClosed);
     }
 
     for (Map<String, Object> file : filesToDownload) {
@@ -1195,7 +1188,18 @@ public class IndexFetcher {
         "Bytes downloaded: {}, Bytes skipped downloading: {}",
         bytesDownloaded,
         bytesSkippedCopying);
-    return bytesDownloaded;
+
+    final long timeTakenSeconds = getReplicationTimeElapsed();
+    final Long bytesDownloadedPerSecond =
+        (timeTakenSeconds != 0 ? bytesDownloaded / timeTakenSeconds : null);
+    log.info(
+        "Total time taken for download (fullCopy={},bytesDownloaded={}) : {} secs ({} bytes/sec) to {}",
+        downloadCompleteIndex,
+        bytesDownloaded,
+        timeTakenSeconds,
+        bytesDownloadedPerSecond,
+        tmpIndexDir);
+    return indexWriterClosed;
   }
 
   // only for testing purposes. do not use this anywhere else
@@ -1229,8 +1233,8 @@ public class IndexFetcher {
     return approxTotalSpaceReqd;
   }
 
-  private void deleteFilesInAdvance(
-      Directory indexDir, String indexDirPath, long usableDiskSpace, long totalSpaceRequired)
+  private boolean deleteFilesInAdvance(
+      Directory indexDir, String indexDirPath, long usableDiskSpace, long totalSpaceRequired, boolean indexWriterClosed)
       throws IOException {
     long actualSpaceReqd = totalSpaceRequired;
     List<String> filesTobeDeleted = new ArrayList<>();
@@ -1244,19 +1248,36 @@ public class IndexFetcher {
           CompareResult compareResult =
               compareFile(indexDir, filename, size, (Long) fileInfo.get(CHECKSUM));
           if (!compareResult.equal || filesToAlwaysDownloadIfNoChecksums(f, size, compareResult)) {
-            filesTobeDeleted.add(f);
-            clearedSpace += size;
+            try {
+              clearedSpace += indexDir.fileLength(f);
+              filesTobeDeleted.add(f);
+            } catch (FileNotFoundException | NoSuchFileException e) {
+              // no problem , it was deleted by someone else
+            }
           } else {
             /*this file will not be downloaded*/
             actualSpaceReqd -= size;
           }
+          break;
+        }
+        // This file is no longer needed
+        try {
+          clearedSpace += indexDir.fileLength(f);
+          filesTobeDeleted.add(f);
+        } catch (FileNotFoundException | NoSuchFileException e) {
+          // no problem , it was deleted by someone else
         }
       }
     }
     if (usableDiskSpace > getApproxTotalSpaceReqd(actualSpaceReqd)) {
       // after considering the files actually available locally we really don't need to do any
       // delete
-      return;
+      return false;
+    }
+    if (usableDiskSpace + clearedSpace < getApproxTotalSpaceReqd(actualSpaceReqd)) {
+      log.warn(
+          "There will not be enough disk space to download the index from leader even after deleting old index files pre-emptively. So cleaning up will be skipped in order to keep a working version of the index in-place.");
+      return false;
     }
     log.info(
         "This disk does not have enough space to download the index from leader. So cleaning up the local index. "
@@ -1270,7 +1291,9 @@ public class IndexFetcher {
     solrCore.deleteNonSnapshotIndexFiles(indexDirPath);
     this.solrCore.closeSearcher();
     assert testWait.getAsBoolean();
-    solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(this.solrCore, false);
+    if (!indexWriterClosed) {
+      solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(this.solrCore, false);
+    }
     for (String f : filesTobeDeleted) {
       try {
         indexDir.deleteFile(f);
@@ -1278,6 +1301,7 @@ public class IndexFetcher {
         // no problem , it was deleted by someone else
       }
     }
+    return true;
   }
 
   static boolean filesToAlwaysDownloadIfNoChecksums(
